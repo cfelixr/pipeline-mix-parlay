@@ -21,8 +21,8 @@ PARAMS ?= \
   ParameterKey=Region,ParameterValue=$(REGION) \
   ParameterKey=S3RawBucket,ParameterValue=$(S3_RAW_BUCKET) \
   ParameterKey=S3AnalyticsBucket,ParameterValue=$(S3_ANALYTICS_BUCKET) \
-  ParameterKey=TagProject,ParameterValue=Llamabara \
-  ParameterKey=TagApplication,ParameterValue=etl-mp-pipeline
+  ParameterKey=TagProject,ParameterValue=llamitaV2 \
+  ParameterKey=TagApplication,ParameterValue=pipeline-mix-parlay
 
 define DCMD
 docker compose run --rm -e AWS_PROFILE=$(PROFILE) -e AWS_REGION=$(REGION) sam "$(1)"

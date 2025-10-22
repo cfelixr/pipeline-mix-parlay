@@ -66,6 +66,21 @@ Parameters:
     Default: 'ENV=prod'
     Description: Variables de entorno en formato KEY=VALUE,KEY2=VALUE2
 
+  TagProject:
+    Type: String
+    Default: llamitaV2
+    Description: Project tag for cost allocation
+
+  Stage:
+    Type: String
+    Default: dev
+    Description: Stage tag
+
+  TagApplication:
+    Type: String
+    Default: pipeline-mix-parlay
+    Description: Application tag for resource identification
+
 Mappings: {}
 
 Resources:
@@ -79,6 +94,15 @@ Resources:
       PrivateDnsEnabled: true
       SubnetIds: !Ref SubnetIds
       SecurityGroupIds: [ !Ref VpcEndpointSecurityGroup ]
+      Tags:
+        - Key: Stack
+          Value: !Ref AWS::StackName
+        - Key: Project
+          Value: !Ref TagProject
+        - Key: Application
+          Value: !Ref TagApplication
+        - Key: Environment
+          Value: !Ref Stage
 
   EcsAgentEndpoint:
     Type: AWS::EC2::VPCEndpoint
@@ -89,6 +113,15 @@ Resources:
       PrivateDnsEnabled: true
       SubnetIds: !Ref SubnetIds
       SecurityGroupIds: [ !Ref VpcEndpointSecurityGroup ]
+      Tags:
+          - Key: Stack
+            Value: !Ref AWS::StackName
+          - Key: Project
+            Value: !Ref TagProject
+          - Key: Application
+            Value: !Ref TagApplication
+          - Key: Environment
+            Value: !Ref Stage
 
   EcsTelemetryEndpoint:
     Type: AWS::EC2::VPCEndpoint
@@ -99,6 +132,15 @@ Resources:
       PrivateDnsEnabled: true
       SubnetIds: !Ref SubnetIds
       SecurityGroupIds: [ !Ref VpcEndpointSecurityGroup ]
+      Tags:
+          - Key: Stack
+            Value: !Ref AWS::StackName
+          - Key: Project
+            Value: !Ref TagProject
+          - Key: Application
+            Value: !Ref TagApplication
+          - Key: Environment
+            Value: !Ref Stage
 
   TaskExecutionRole:
     Type: AWS::IAM::Role
@@ -130,6 +172,15 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: "*"
+      Tags:
+          - Key: Stack
+            Value: !Ref AWS::StackName
+          - Key: Project
+            Value: !Ref TagProject
+          - Key: Application
+            Value: !Ref TagApplication
+          - Key: Environment
+            Value: !Ref Stage
 
   TaskRole:
     Type: AWS::IAM::Role
@@ -172,12 +223,30 @@ Resources:
                 Action: ['s3:PutObject','s3:AbortMultipartUpload','s3:ListBucketMultipartUploads','s3:ListMultipartUploadParts']
                 Resource:
                   - arn:aws:s3:::s3-bucket-prod-lake-analytics/bd_bets/*  # o el bucket/prefix de destino real
+      Tags:
+          - Key: Stack
+            Value: !Ref AWS::StackName
+          - Key: Project
+            Value: !Ref TagProject
+          - Key: Application
+            Value: !Ref TagApplication
+          - Key: Environment
+            Value: !Ref Stage  
 
   AppLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub '/ecs/${ProjectName}'
       RetentionInDays: 14
+      Tags:
+          - Key: Stack
+            Value: !Ref AWS::StackName
+          - Key: Project
+            Value: !Ref TagProject
+          - Key: Application
+            Value: !Ref TagApplication
+          - Key: Environment
+            Value: !Ref Stage
 
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
@@ -226,6 +295,15 @@ Resources:
               Value: !Ref AWS::Region
             - Name: AWS_DEFAULT_REGION
               Value: us-east-2
+      Tags:
+          - Key: Stack
+            Value: !Ref AWS::StackName
+          - Key: Project
+            Value: !Ref TagProject
+          - Key: Application
+            Value: !Ref TagApplication
+          - Key: Environment
+            Value: !Ref Stage
 
   # Rol que usa EventBridge para invocar ecs:RunTask y pasar roles
   EventsToEcsRole:
@@ -254,6 +332,15 @@ Resources:
                 Condition:
                   StringLikeIfExists:
                     iam:PassedToService: ecs-tasks.amazonaws.com
+      Tags:
+          - Key: Stack
+            Value: !Ref AWS::StackName
+          - Key: Project
+            Value: !Ref TagProject
+          - Key: Application
+            Value: !Ref TagApplication
+          - Key: Environment
+            Value: !Ref Stage  
 
   # Regla de EventBridge que dispara la tarea diaria
   # DailyScheduleRule:
@@ -298,6 +385,14 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${ProjectName}-vpce-sg'
+        - Key: Stack
+          Value: !Ref AWS::StackName
+        - Key: Project
+          Value: !Ref TagProject
+        - Key: Application
+          Value: !Ref TagApplication
+        - Key: Environment
+          Value: !Ref Stage
 
   # Interface: ECR API
   EcrApiEndpoint:
@@ -309,6 +404,16 @@ Resources:
       PrivateDnsEnabled: true
       SubnetIds: !Ref SubnetIds
       SecurityGroupIds: [ !Ref VpcEndpointSecurityGroup ]
+      Tags:
+          - Key: Stack
+            Value: !Ref AWS::StackName
+          - Key: Project
+            Value: !Ref TagProject
+          - Key: Application
+            Value: !Ref TagApplication
+          - Key: Environment
+            Value: !Ref Stage
+      
 
   # Interface: ECR DKR (capas)
   EcrDkrEndpoint:
@@ -320,6 +425,15 @@ Resources:
       PrivateDnsEnabled: true
       SubnetIds: !Ref SubnetIds
       SecurityGroupIds: [ !Ref VpcEndpointSecurityGroup ]
+      Tags:
+          - Key: Stack
+            Value: !Ref AWS::StackName
+          - Key: Project
+            Value: !Ref TagProject
+          - Key: Application
+            Value: !Ref TagApplication
+          - Key: Environment
+            Value: !Ref Stage
 
   # Interface: CloudWatch Logs
   CloudWatchLogsEndpoint:
@@ -331,6 +445,15 @@ Resources:
       PrivateDnsEnabled: true
       SubnetIds: !Ref SubnetIds
       SecurityGroupIds: [ !Ref VpcEndpointSecurityGroup ]
+      Tags:
+          - Key: Stack
+            Value: !Ref AWS::StackName
+          - Key: Project
+            Value: !Ref TagProject
+          - Key: Application
+            Value: !Ref TagApplication
+          - Key: Environment
+            Value: !Ref Stage
 
   # Gateway: S3 (para ECR pulls y tu I/O con S3)
   S3GatewayEndpoint:
@@ -341,6 +464,15 @@ Resources:
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
       RouteTableIds: !Ref PrivateRouteTableIds
       # Opcional: PolicyDocument para limitar a buckets específicos
+      Tags:
+          - Key: Stack
+            Value: !Ref AWS::StackName
+          - Key: Project
+            Value: !Ref TagProject
+          - Key: Application
+            Value: !Ref TagApplication
+          - Key: Environment
+            Value: !Ref Stage
 
 Outputs:
   ECRRepositoryUri:
