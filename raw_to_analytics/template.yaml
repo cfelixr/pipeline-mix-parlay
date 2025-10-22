@@ -1,0 +1,363 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: ECS Fargate Scheduled Task with ECR repo – built from external Docker build (con VPC Endpoints)
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: llamita-mp-task-raw-to-analytics
+
+  ECRRepoName:
+    Type: String
+    Default: llamita-mp-task-raw-to-analytics
+    Description: Nombre del repositorio ECR que contendrá la imagen.
+
+  ExistingClusterName:
+    Type: String
+    Default: llamita-stack-infra-prod-cluster
+    Description: Nombre del cluster ECS (Fargate) ya existente.
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: "vpc-0c977f40fb39d3738"
+    Description: VPC donde corre tu cluster.
+
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Default: "subnet-0c58c0fb26b789f41"
+    Description: Subnets donde correrá la tarea (usualmente privadas).
+
+  SecurityGroupIds:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+    Default: "sg-054c692a3ff74102f"
+    Description: SGs a asociar a la tarea.
+
+  # Route tables privadas para S3 Gateway Endpoint
+  PrivateRouteTableIds:
+    Type: CommaDelimitedList
+    Default: "rtb-06376cba5737b9939"
+    Description: Route tables de las subnets privadas (para S3 Gateway Endpoint)
+
+  ContainerPort:
+    Type: Number
+    Default: 8080
+
+  # Fargate: pares válidos y como STRING
+  FargateCpu:
+    Type: String
+    Default: "4096"         # 2 vCPU
+
+  FargateMemory:
+    Type: String
+    Default: "30720"        # 16 GiB (cubre pico 15 GiB)
+
+  EphemeralGiB:
+    Type: Number
+    Default: 100             # scratch para /tmp, descompresiones, etc.
+
+  # 03:00 America/Lima = 08:00 UTC
+  ScheduleExpressionUTC:
+    Type: String
+    Default: 'cron(0 8 * * ? *)'
+    Description: Expresión de cron en UTC para EventBridge (p.ej. 08:00 UTC = 03:00 Lima)
+
+  ContainerEnv:
+    Type: String
+    Default: 'ENV=prod'
+    Description: Variables de entorno en formato KEY=VALUE,KEY2=VALUE2
+
+Mappings: {}
+
+Resources:
+
+  EcsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: Interface
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ecs'
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref SubnetIds
+      SecurityGroupIds: [ !Ref VpcEndpointSecurityGroup ]
+
+  EcsAgentEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: Interface
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ecs-agent'
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref SubnetIds
+      SecurityGroupIds: [ !Ref VpcEndpointSecurityGroup ]
+
+  EcsTelemetryEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: Interface
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ecs-telemetry'
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref SubnetIds
+      SecurityGroupIds: [ !Ref VpcEndpointSecurityGroup ]
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-ecsTaskExecutionRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: ECRPullLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-ecsTaskRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AppPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [ 'logs:CreateLogStream', 'logs:PutLogEvents' ]
+                Resource: '*'
+              # Agrega aquí permisos específicos (S3, SQS, etc.)
+              - Effect: Allow
+                Action: ['s3:ListBucket']
+                Resource:
+                  - arn:aws:s3:::s3-bucket-prod-lake-raw
+                  - arn:aws:s3:::s3-bucket-prod-lake-analytics 
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - bd_bets/*           # ajusta a tus prefijos
+                      - bets/*              # si aplica
+
+              - Effect: Allow
+                Action: ['s3:GetObject']
+                Resource:
+                  - arn:aws:s3:::s3-bucket-prod-lake-analytics/bd_bets/* 
+                  - arn:aws:s3:::s3-bucket-prod-lake-raw/bd_bets/*
+
+              # === ESCRITURA hacia ANALYTIC (si tu app guarda resultados) ===
+              - Effect: Allow
+                Action: ['s3:PutObject','s3:AbortMultipartUpload','s3:ListBucketMultipartUploads','s3:ListMultipartUploadParts']
+                Resource:
+                  - arn:aws:s3:::s3-bucket-prod-lake-analytics/bd_bets/*  # o el bucket/prefix de destino real
+
+  AppLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${ProjectName}'
+      RetentionInDays: 14
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ProjectName}-task'
+      RequiresCompatibilities: [ FARGATE ]
+      NetworkMode: awsvpc
+      Cpu: !Ref FargateCpu
+      Memory: !Ref FargateMemory
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      EphemeralStorage:
+        SizeInGiB: !Ref EphemeralGiB
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: X86_64
+      ContainerDefinitions:
+        - Name: app
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECRRepoName}:latest'
+          Essential: true
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+              Protocol: tcp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref AppLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: app
+          Environment:
+            - Name: PLACEHOLDER
+              Value: !Ref ContainerEnv
+            - Name: ANALYTIC_BUCKET
+              Value:  s3-bucket-prod-lake-analytics
+            - Name: ANALYTIC_BUCKET_TABLE
+              Value: bd_bets
+            - Name: MASTER_BUCKET
+              Value: s3-bucket-prod-lake-master
+            - Name: MASTER_BUCKET_TABLE
+              Value: bd_bets
+            - Name: RAW_BUCKET
+              Value: s3-bucket-prod-lake-raw
+            - Name: RAW_BUCKET_TABLE
+              Value: bd_bets
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: AWS_DEFAULT_REGION
+              Value: us-east-2
+
+  # Rol que usa EventBridge para invocar ecs:RunTask y pasar roles
+  EventsToEcsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-events-to-ecs'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: events.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: RunTaskAndPassRoles
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [ 'ecs:RunTask' ]
+                Resource: !Ref TaskDefinition
+              - Effect: Allow
+                Action: [ 'iam:PassRole' ]
+                Resource:
+                  - !GetAtt TaskExecutionRole.Arn
+                  - !GetAtt TaskRole.Arn
+                Condition:
+                  StringLikeIfExists:
+                    iam:PassedToService: ecs-tasks.amazonaws.com
+
+  # Regla de EventBridge que dispara la tarea diaria
+  # DailyScheduleRule:
+  #   Type: AWS::Events::Rule
+  #   Properties:
+  #     Name: !Sub '${ProjectName}-daily-schedule'
+  #     Description: Dispara la tarea Fargate una vez al día (UTC)
+  #     ScheduleExpression: !Ref ScheduleExpressionUTC
+  #     State: ENABLED
+  #     Targets:
+  #       - Id: EcsRunTask
+  #         Arn: !Sub 'arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:cluster/${ExistingClusterName}'
+  #         RoleArn: !GetAtt EventsToEcsRole.Arn
+  #         EcsParameters:
+  #           TaskDefinitionArn: !Ref TaskDefinition
+  #           LaunchType: FARGATE
+  #           PlatformVersion: LATEST
+  #           NetworkConfiguration:
+  #             AwsVpcConfiguration:
+  #               AssignPublicIp: DISABLED
+  #               Subnets: !Ref SubnetIds
+  #               SecurityGroups: !Ref SecurityGroupIds
+
+  # =========================
+  # VPC ENDPOINTS (us-east-2)
+  # =========================
+
+  # SG para los Interface Endpoints (ECR/Logs). Permite 443 desde el SG de la tarea
+  VpcEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SG para Interface VPC Endpoints (ECR/Logs)
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Select [0, !Ref SecurityGroupIds]
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-vpce-sg'
+
+  # Interface: ECR API
+  EcrApiEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: Interface
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ecr.api'
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref SubnetIds
+      SecurityGroupIds: [ !Ref VpcEndpointSecurityGroup ]
+
+  # Interface: ECR DKR (capas)
+  EcrDkrEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: Interface
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ecr.dkr'
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref SubnetIds
+      SecurityGroupIds: [ !Ref VpcEndpointSecurityGroup ]
+
+  # Interface: CloudWatch Logs
+  CloudWatchLogsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: Interface
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.logs'
+      PrivateDnsEnabled: true
+      SubnetIds: !Ref SubnetIds
+      SecurityGroupIds: [ !Ref VpcEndpointSecurityGroup ]
+
+  # Gateway: S3 (para ECR pulls y tu I/O con S3)
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: Gateway
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      RouteTableIds: !Ref PrivateRouteTableIds
+      # Opcional: PolicyDocument para limitar a buckets específicos
+
+Outputs:
+  ECRRepositoryUri:
+    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECRRepoName}'
+    Export:
+      Name: !Sub '${ProjectName}-ECRRepoUri'
+  TaskDefinitionArn:
+    Value: !Ref TaskDefinition
+  #EventRuleName:
+  # Value: !Ref DailyScheduleRule
+  VpcEndpointsSecurityGroupId:
+    Value: !Ref VpcEndpointSecurityGroup
+  EcrApiEndpointId:
+    Value: !Ref EcrApiEndpoint
+  EcrDkrEndpointId:
+    Value: !Ref EcrDkrEndpoint
+  CloudWatchLogsEndpointId:
+    Value: !Ref CloudWatchLogsEndpoint
+  S3GatewayEndpointId:
+    Value: !Ref S3GatewayEndpoint

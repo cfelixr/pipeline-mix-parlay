@@ -1,0 +1,20 @@
+# Etapa 1: Construcción
+FROM python:3.12.9-slim AS build
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Etapa 2: Producción
+FROM python:3.12.9-slim
+
+# COPY --from=build /usr/local/lib/python3.12 /usr/local/lib/python3.12
+# COPY --from=build /usr/local/bin /usr/local/bin
+
+COPY --from=build /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+
+WORKDIR /app
+COPY app/ .
+
+ENTRYPOINT ["python", "nrt_bets.py"]
+# CMD ["python", "test.py", "0x000000002B9A8F9A"]

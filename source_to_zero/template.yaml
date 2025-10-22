@@ -1,0 +1,400 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  SAM - ECS (EC2) TaskDefinition + (opcional) Service para imagen específica
+  en cluster existente. Refactor: +parametrización, +buenas prácticas IAM/Logs,
+  +condiciones y soporte opcional ALB.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: "Base" }
+        Parameters:
+          - ClusterArn
+          - ImageUri
+          - ContainerName
+          - ContainerPort
+          - DesiredCount
+          - TaskCpu
+          - TaskMemory
+      - Label: { default: "Red (awsvpc)" }
+        Parameters:
+          - VpcId
+          - SubnetIds
+          - SecurityGroupIds
+          - AssignPublicIp
+      - Label: { default: "Logs" }
+        Parameters:
+          - LogGroupName
+          - LogRetentionDays
+      - Label: { default: "S3 (permisos y entorno)" }
+        Parameters:
+          - S3BucketName
+          - BetsPrefix
+          - MpPrefix
+      - Label: { default: "Variables de entorno" }
+        Parameters:
+          - RootApiEndpoint
+      - Label: { default: "Opcionales" }
+        Parameters:
+          - CreateService
+          - UseLoadBalancer
+          - TargetGroupArn
+          - ContainerHealthCmd
+          - ContainerHealthInterval
+          - ContainerHealthTimeout
+          - ContainerHealthRetries
+          - EphemeralStorageGiB
+          - PermissionsBoundaryArn
+    ParameterLabels:
+      ClusterArn: { default: "ECS Cluster ARN (EC2)" }
+      ImageUri: { default: "URI de imagen (ECR/DockerHub)" }
+      ContainerName: { default: "Nombre del contenedor" }
+      ContainerPort: { default: "Puerto del contenedor" }
+      DesiredCount: { default: "Desired Count (Service)" }
+      TaskCpu: { default: "CPU (task)" }
+      TaskMemory: { default: "Memoria MiB (task)" }
+      VpcId: { default: "VPC ID" }
+      SubnetIds: { default: "Subnet IDs (privadas/públicas)" }
+      SecurityGroupIds: { default: "Security Group IDs" }
+      AssignPublicIp: { default: "Asignar IP pública" }
+      LogGroupName: { default: "Log Group" }
+      LogRetentionDays: { default: "Retención de logs (días)" }
+      S3BucketName: { default: "Bucket S3 fuente" }
+      BetsPrefix: { default: "Prefijo bets/" }
+      MpPrefix: { default: "Prefijo mp/" }
+      EnvBucketTarget: { default: "ENV BUCKET_TARGET" }
+      EnvBetsPrefix: { default: "ENV OBJECT_KEY" }
+      EnvMpPrefix: { default: "ENV OBJECT_KEY_MP" }
+      RootApiEndpoint: { default: "ENV ROOT_API_ENDPOINT" }
+      CreateService: { default: "Crear ECS Service" }
+      UseLoadBalancer: { default: "Asociar a Target Group (ALB/NLB)" }
+      TargetGroupArn: { default: "Target Group ARN" }
+      ContainerHealthCmd: { default: "HealthCheck CMD" }
+      ContainerHealthInterval: { default: "HealthCheck Interval (s)" }
+      ContainerHealthTimeout: { default: "HealthCheck Timeout (s)" }
+      ContainerHealthRetries: { default: "HealthCheck Retries" }
+      EphemeralStorageGiB: { default: "Ephemeral storage GiB" }
+      PermissionsBoundaryArn: { default: "Permissions Boundary (opcional)" }
+
+Parameters:
+  # Imagen / ECS
+  ClusterArn:
+    Type: String
+    Description: ARN del cluster ECS (EC2) existente
+    AllowedPattern: '^arn:aws:ecs:[a-z0-9-]+:\d{12}:cluster\/[A-Za-z0-9-_]+$'
+    Default: "arn:aws:ecs:us-east-2:774305611583:cluster/llamita-stack-infra-prod-cluster"
+
+  ImageUri:
+    Type: String
+    Description: URI de la imagen (ECR, DockerHub, etc.)
+    Default: "774305611583.dkr.ecr.us-east-2.amazonaws.com/llamita-process_online_mp:latest"
+
+  ContainerName:
+    Type: String
+    Default: "app"
+    Description: Nombre lógico del contenedor
+
+  ContainerPort:
+    Type: Number
+    Default: "443"
+    Description: Puerto expuesto por el contenedor
+
+  DesiredCount:
+    Type: Number
+    Default: "1"
+    MinValue: 0
+    Description: Número de tareas (si se crea el Service)
+
+  TaskCpu:
+    Type: String
+    Default: "256"
+    AllowedValues: ["128","256","512","1024","2048","4096"]
+    Description: CPU para la tarea (unidades ECS)
+
+  TaskMemory:
+    Type: String
+    Default: "640"  # Antes 512
+    Description: Memoria (MiB) para la tarea
+
+  EphemeralStorageGiB:
+    Type: Number
+    Default: "0"
+    MinValue: 0
+    MaxValue: 200
+    Description: Tamaño de /tmp para la tarea (0 omite configuración)
+
+  # Red
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: "vpc-0c977f40fb39d3738"
+    Description: VPC donde correrán las tareas
+
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Default: "subnet-0c58c0fb26b789f41"   # CSV si son varias: "subnet-1,subnet-2"
+    Description: Subnets privadas o públicas donde correrán las tareas
+
+  SecurityGroupIds:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+    Default: "sg-054c692a3ff74102f"      # CSV si son varios
+    Description: SGs para las ENIs de las tareas
+
+  AssignPublicIp:
+    Type: String
+    Default: "DISABLED"
+    AllowedValues: ["ENABLED", "DISABLED"]
+    Description: Asignar IP pública a las tareas (subnets públicas)
+
+  # LogsWAA
+  LogGroupName:
+    Type: String
+    Default: "/ecs/app"
+    Description: Nombre del Log Group
+
+  LogRetentionDays:
+    Type: Number
+    Default: "30"
+    AllowedValues: ["1","3","5","7","14","30","60","90","120","150","180","365","400","545","731","1827","3653"]
+    Description: Retención de logs (días)
+
+  # S3 / permisos
+  S3BucketName:
+    Type: String
+    Default: "s3-bucket-prod-lake-zero"    # 
+    AllowedPattern: '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'
+    Description: Bucket fuente en S3
+
+  BetsPrefix:
+    Type: String
+    Default: "bd_bets/bets/"
+    Description: Prefijo bets (termina en "/")
+
+  MpPrefix:
+    Type: String
+    Default: "bd_bets/mp/"
+    Description: Prefijo mp (termina en "/")
+
+  RootApiEndpoint:
+    Type: String
+    Default: "https://daapi-prod.568winex.com/api/Bets/get-bets-by-timestamp"
+    Description: Valor para ENV ROOT_API_ENDPOINT
+
+  # Opcionales
+  CreateService:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Si 'true', crea ECS Service
+
+  UseLoadBalancer:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Asociar Service a un Target Group (ALB/NLB)
+
+  TargetGroupArn:
+    Type: String
+    Default: ""
+    Description: ARN del Target Group (requerido si UseLoadBalancer=true)
+
+  ContainerHealthCmd:
+    Type: String
+    Default: ""
+    Description: |
+      Comando para HEALTHCHECK del contenedor (formato CMD-SHELL, p.ej. 'curl -f http://localhost:443/health || exit 1').
+      Si vacío, no se configura healthcheck.
+
+  ContainerHealthInterval:
+    Type: Number
+    Default: "30"
+    Description: Intervalo del healthcheck (segundos)
+
+  ContainerHealthTimeout:
+    Type: Number
+    Default: "5"
+    Description: Timeout del healthcheck (segundos)
+
+  ContainerHealthRetries:
+    Type: Number
+    Default: "3"
+    Description: Reintentos del healthcheck
+
+  PermissionsBoundaryArn:
+    Type: String
+    Default: ""
+    Description: ARN de Permissions Boundary para roles de la tarea (opcional)
+
+Conditions:
+  DoCreateService: !Equals [!Ref CreateService, "true"]
+  UseTG:           !Equals [!Ref UseLoadBalancer, "true"]
+  HasHealthCheck:  !Not [!Equals [!Ref ContainerHealthCmd, ""]]
+  HasEphemeral:    !Not [!Equals [!Ref EphemeralStorageGiB, 0]]
+  HasPermissionsBoundary: !Not [!Equals [!Ref PermissionsBoundaryArn, ""]]
+
+Resources:
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # Sin RoleName para evitar colisiones; CFN generará uno único
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: cw-logs-create-group
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: logs:CreateLogGroup
+                Resource: "*"
+      PermissionsBoundary: !If
+        - HasPermissionsBoundary
+        - !Ref PermissionsBoundaryArn
+        - !Ref AWS::NoValue
+      Tags:
+        - Key: Stack
+          Value: !Ref AWS::StackName
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      # Política coherente con lectura/escritura limitada a prefijos
+      Policies:
+        - PolicyName: s3-bets-rw-limited-prefixes
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ListBucketLimitedByPrefixes
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub arn:aws:s3:::${S3BucketName}
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - !Ref BetsPrefix
+                      - !Sub "${BetsPrefix}*"
+                      - !Ref MpPrefix
+                      - !Sub "${MpPrefix}*"
+              - Sid: RWObjectsInPrefixes
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource:
+                  - !Sub arn:aws:s3:::${S3BucketName}/${BetsPrefix}*
+                  - !Sub arn:aws:s3:::${S3BucketName}/${MpPrefix}*
+      PermissionsBoundary: !If
+        - HasPermissionsBoundary
+        - !Ref PermissionsBoundaryArn
+        - !Ref AWS::NoValue
+      Tags:
+        - Key: Stack
+          Value: !Ref AWS::StackName
+
+  AppLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Ref LogGroupName
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Stack
+          Value: !Ref AWS::StackName
+
+  AppTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${ContainerName}-${AWS::StackName}
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [EC2]   # Cluster EC2
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      EphemeralStorage: !If
+        - HasEphemeral
+        - { SizeInGiB: !Ref EphemeralStorageGiB }
+        - !Ref AWS::NoValue
+      ContainerDefinitions:
+        - Name: !Ref ContainerName
+          Image: !Ref ImageUri
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+              Protocol: tcp
+              AppProtocol: http
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroupName
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: !Ref ContainerName
+          Essential: true
+          Environment:
+            - Name: BUCKET_TARGET
+              Value: !Ref S3BucketName
+            - Name: OBJECT_KEY
+              Value: !Ref BetsPrefix
+            - Name: OBJECT_KEY_MP
+              Value: !Ref MpPrefix
+            - Name: ROOT_API_ENDPOINT
+              Value: !Ref RootApiEndpoint
+          HealthCheck: !If
+            - HasHealthCheck
+            - Command: [ "CMD-SHELL", !Ref ContainerHealthCmd ]
+              Interval: !Ref ContainerHealthInterval
+              Timeout: !Ref ContainerHealthTimeout
+              Retries: !Ref ContainerHealthRetries
+            - !Ref AWS::NoValue
+      Tags:
+        - Key: Stack
+          Value: !Ref AWS::StackName
+
+  AppService:
+    Type: AWS::ECS::Service
+    Condition: DoCreateService
+    DependsOn: AppLogGroup
+    Properties:
+      ServiceName: !Sub ${ContainerName}-svc
+      Cluster: !Ref ClusterArn
+      LaunchType: EC2
+      DesiredCount: !Ref DesiredCount
+      TaskDefinition: !Ref AppTaskDefinition
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 50
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: !Ref AssignPublicIp
+          Subnets: !Ref SubnetIds
+          SecurityGroups: !Ref SecurityGroupIds
+      LoadBalancers:
+        - !If
+          - UseTG
+          - TargetGroupArn: !Ref TargetGroupArn
+            ContainerName: !Ref ContainerName
+            ContainerPort: !Ref ContainerPort
+          - !Ref AWS::NoValue
+      Tags:
+        - Key: Stack
+          Value: !Ref AWS::StackName
+
+Outputs:
+  TaskDefinitionArn:
+    Description: ARN de la Task Definition
+    Value: !Ref AppTaskDefinition
+
+  ServiceName:
+    Condition: DoCreateService
+    Description: Nombre del ECS Service creado
+    Value: !Ref AppService
