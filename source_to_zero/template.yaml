@@ -225,6 +225,21 @@ Parameters:
     Default: ""
     Description: ARN de Permissions Boundary para roles de la tarea (opcional)
 
+  TagProject:
+    Type: String
+    Default: llamitaV2
+    Description: Project tag for cost allocation
+
+  Stage:
+    Type: String
+    Default: dev
+    Description: Stage tag
+
+  TagApplication:
+    Type: String
+    Default: head-to-head
+    Description: Application tag for resource identification
+
 Conditions:
   DoCreateService: !Equals [!Ref CreateService, "true"]
   UseTG:           !Equals [!Ref UseLoadBalancer, "true"]
@@ -260,6 +275,12 @@ Resources:
       Tags:
         - Key: Stack
           Value: !Ref AWS::StackName
+        - Key: Project
+          Value: !Ref TagProject
+        - Key: Application
+          Value: !Ref TagApplication
+        - Key: Environment
+          Value: !Ref Stage
 
   TaskRole:
     Type: AWS::IAM::Role
@@ -302,6 +323,12 @@ Resources:
       Tags:
         - Key: Stack
           Value: !Ref AWS::StackName
+        - Key: Project
+          Value: !Ref TagProject
+        - Key: Application
+          Value: !Ref TagApplication
+        - Key: Environment
+          Value: !Ref Stage
 
   AppLogGroup:
     Type: AWS::Logs::LogGroup
@@ -311,6 +338,12 @@ Resources:
       Tags:
         - Key: Stack
           Value: !Ref AWS::StackName
+        - Key: Project
+          Value: !Ref TagProject
+        - Key: Application
+          Value: !Ref TagApplication
+        - Key: Environment
+          Value: !Ref Stage
 
   AppTaskDefinition:
     Type: AWS::ECS::TaskDefinition
@@ -359,6 +392,12 @@ Resources:
       Tags:
         - Key: Stack
           Value: !Ref AWS::StackName
+        - Key: Project
+          Value: !Ref TagProject
+        - Key: Application
+          Value: !Ref TagApplication
+        - Key: Environment
+          Value: !Ref Stage
 
   AppService:
     Type: AWS::ECS::Service
@@ -388,6 +427,12 @@ Resources:
       Tags:
         - Key: Stack
           Value: !Ref AWS::StackName
+        - Key: Project
+          Value: !Ref TagProject
+        - Key: Application
+          Value: !Ref TagApplication
+        - Key: Environment
+          Value: !Ref Stage
 
 Outputs:
   TaskDefinitionArn:
